@@ -1,0 +1,230 @@
+<?php
+require_once __DIR__ . '/../config.php';
+adminGuard();
+
+$db = getDB();
+$admin = $_SESSION[ADMIN_SESSION_NAME];
+
+// Actions
+$msg = ''; $msgType = 'success';
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    $action = $_POST['action'] ?? '';
+
+    // Créer un client
+    if ($action === 'create') {
+        $nom   = trim($_POST['nom'] ?? '');
+        $email = trim($_POST['email'] ?? '');
+        $pass  = $_POST['password'] ?? '';
+
+        if (!$nom || !$email || !$pass) {
+            $msg = 'Tous les champs sont requis.'; $msgType = 'error';
+        } elseif (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
+            $msg = 'Email invalide.'; $msgType = 'error';
+        } else {
+            try {
+                $stmt = $db->prepare('INSERT INTO clients (nom, email, password_hash) VALUES (?,?,?)');
+                $stmt->execute([$nom, $email, password_hash($pass, PASSWORD_BCRYPT)]);
+                $msg = "Client « $nom » créé avec succès.";
+            } catch (PDOException $e) {
+                $msg = 'Email déjà utilisé.'; $msgType = 'error';
+            }
+        }
+    }
+
+    // Activer / désactiver
+    if ($action === 'toggle') {
+        $id = (int)($_POST['client_id'] ?? 0);
+        $db->prepare('UPDATE clients SET actif = 1 - actif WHERE id = ?')->execute([$id]);
+        $msg = 'Statut mis à jour.';
+    }
+
+    // Supprimer
+    if ($action === 'delete') {
+        $id = (int)($_POST['client_id'] ?? 0);
+        $db->prepare('DELETE FROM clients WHERE id = ?')->execute([$id]);
+        $msg = 'Client supprimé.';
+    }
+
+    // Réinitialiser mot de passe
+    if ($action === 'reset_pass') {
+        $id   = (int)($_POST['client_id'] ?? 0);
+        $pass = trim($_POST['new_password'] ?? '');
+        if (strlen($pass) >= 6) {
+            $db->prepare('UPDATE clients SET password_hash = ? WHERE id = ?')
+               ->execute([password_hash($pass, PASSWORD_BCRYPT), $id]);
+            $msg = 'Mot de passe réinitialisé.';
+        } else {
+            $msg = 'Mot de passe trop court (min. 6 caractères).'; $msgType = 'error';
+        }
+    }
+
+    // Déconnexion
+    if ($action === 'logout') {
+        session_destroy();
+        header('Location: index.php'); exit;
+    }
+}
+
+// Stats
+$totalClients = $db->query('SELECT COUNT(*) FROM clients')->fetchColumn();
+$totalEvents  = $db->query('SELECT COUNT(*) FROM events')->fetchColumn();
+$totalPhotos  = $db->query('SELECT COUNT(*) FROM photos')->fetchColumn();
+
+// Liste clients avec stats
+$clients = $db->query('
+    SELECT c.*,
+           COUNT(DISTINCT e.id) AS nb_events,
+           COUNT(DISTINCT p.id) AS nb_photos
+    FROM clients c
+    LEFT JOIN events e ON e.client_id = c.id
+    LEFT JOIN photos p ON p.event_id = e.id
+    GROUP BY c.id
+    ORDER BY c.created_at DESC
+')->fetchAll();
+?><!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Admin Dashboard — <?= SITE_NAME ?></title>
+<link rel="stylesheet" href="../assets/css/style.css">
+</head>
+<body>
+
+<nav class="topbar">
+  <div class="topbar-brand">Photo<span>Booth</span> &nbsp;·&nbsp; <span style="color:var(--text3);font-size:13px">Super Admin</span></div>
+  <div class="topbar-nav">
+    <span class="topbar-user"><?= htmlspecialchars($admin['username']) ?></span>
+    <form method="post" style="display:inline">
+      <input type="hidden" name="action" value="logout">
+      <button class="btn btn-ghost btn-sm" type="submit">Déconnexion</button>
+    </form>
+  </div>
+</nav>
+
+<div class="container" style="padding-top:32px;padding-bottom:40px">
+
+  <?php if ($msg): ?>
+    <div class="alert alert-<?= $msgType ?>"><?= htmlspecialchars($msg) ?></div>
+  <?php endif; ?>
+
+  <!-- Stats -->
+  <div class="stats-grid">
+    <div class="stat-card">
+      <div class="stat-label">Clients</div>
+      <div class="stat-value" style="color:var(--accent2)"><?= $totalClients ?></div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Événements</div>
+      <div class="stat-value" style="color:var(--green)"><?= $totalEvents ?></div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Photos</div>
+      <div class="stat-value" style="color:var(--amber)"><?= $totalPhotos ?></div>
+    </div>
+  </div>
+
+  <!-- Créer un client -->
+  <div class="card mb-3">
+    <div class="card-header">
+      <span class="card-title">Créer un client</span>
+    </div>
+    <form method="post">
+      <input type="hidden" name="action" value="create">
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr auto;gap:12px;align-items:flex-end">
+        <div class="form-group" style="margin:0">
+          <label class="form-label">Nom</label>
+          <input class="form-control" type="text" name="nom" placeholder="Jean Dupont" required>
+        </div>
+        <div class="form-group" style="margin:0">
+          <label class="form-label">Email</label>
+          <input class="form-control" type="email" name="email" placeholder="jean@exemple.fr" required>
+        </div>
+        <div class="form-group" style="margin:0">
+          <label class="form-label">Mot de passe</label>
+          <input class="form-control" type="text" name="password" placeholder="Min. 6 caractères" required>
+        </div>
+        <button class="btn btn-primary" type="submit">Créer</button>
+      </div>
+    </form>
+  </div>
+
+  <!-- Liste clients -->
+  <div class="card">
+    <div class="card-header">
+      <span class="card-title">Clients (<?= count($clients) ?>)</span>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Nom</th>
+            <th>Email</th>
+            <th>Événements</th>
+            <th>Photos</th>
+            <th>Statut</th>
+            <th>Créé le</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          <?php foreach ($clients as $c): ?>
+          <tr>
+            <td data-label="Nom"><?= htmlspecialchars($c['nom']) ?></td>
+            <td data-label="Email" style="color:var(--text2)"><?= htmlspecialchars($c['email']) ?></td>
+            <td data-label="Événements"><?= $c['nb_events'] ?></td>
+            <td data-label="Photos"><?= $c['nb_photos'] ?></td>
+            <td data-label="Statut">
+              <span class="badge badge-<?= $c['actif'] ? 'green' : 'red' ?>">
+                <?= $c['actif'] ? 'Actif' : 'Suspendu' ?>
+              </span>
+            </td>
+            <td data-label="Créé le" style="color:var(--text3);font-size:13px"><?= date('d/m/Y', strtotime($c['created_at'])) ?></td>
+            <td>
+              <div class="flex gap-2">
+                <!-- Activer/désactiver -->
+                <form method="post" style="display:inline">
+                  <input type="hidden" name="action" value="toggle">
+                  <input type="hidden" name="client_id" value="<?= $c['id'] ?>">
+                  <button class="btn btn-ghost btn-sm" type="submit"><?= $c['actif'] ? 'Suspendre' : 'Activer' ?></button>
+                </form>
+                <!-- Reset MDP -->
+                <button class="btn btn-ghost btn-sm" onclick="showReset(<?= $c['id'] ?>)">MDP</button>
+                <!-- Supprimer -->
+                <form method="post" style="display:inline" onsubmit="return confirm('Supprimer ce client et tous ses événements ?')">
+                  <input type="hidden" name="action" value="delete">
+                  <input type="hidden" name="client_id" value="<?= $c['id'] ?>">
+                  <button class="btn btn-danger btn-sm" type="submit">✕</button>
+                </form>
+              </div>
+              <!-- Form reset mdp inline -->
+              <form method="post" id="reset-<?= $c['id'] ?>" style="display:none;margin-top:8px">
+                <input type="hidden" name="action" value="reset_pass">
+                <input type="hidden" name="client_id" value="<?= $c['id'] ?>">
+                <div style="display:flex;gap:8px">
+                  <input class="form-control" type="text" name="new_password" placeholder="Nouveau MDP" required>
+                  <button class="btn btn-primary btn-sm" type="submit">OK</button>
+                </div>
+              </form>
+            </td>
+          </tr>
+          <?php endforeach; ?>
+          <?php if (!$clients): ?>
+          <tr><td colspan="7" style="text-align:center;color:var(--text3);padding:30px">Aucun client pour l'instant.</td></tr>
+          <?php endif; ?>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+</div>
+
+<script>
+function showReset(id) {
+  const el = document.getElementById('reset-' + id);
+  el.style.display = el.style.display === 'none' ? 'block' : 'none';
+}
+</script>
+</body>
+</html>
